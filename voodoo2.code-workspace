@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"vmssoftware.project-dep.buildName": "DEBUG",
+		"files.associations": {
+			"*.h65": "ca65",
+			"voodoo2.h": "c",
+			"EXE_ROUTINES.H": "cpp",
+			"builtins.h": "c",
+			"FXDRIVER.C": "cpp",
+			"BUILTINS.H": "cpp"
+		}
+	}
+}
