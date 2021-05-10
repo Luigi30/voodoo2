@@ -24,8 +24,9 @@ int driver$init_tables()
     ini_ddt_cancel      (&driver$ddt, ioc_std$cancelio);
     ini_ddt_end         (&driver$ddt);
 
-    ini_fdt_act (&driver$fdt, IO$_READPBLK,     SST$read,   BUFFERED_64);
-    ini_fdt_act (&driver$fdt, IO$_WRITEPBLK,    SST$write,  BUFFERED_64);
+    ini_fdt_act (&driver$fdt, IO$_READPBLK,     SST$read,           BUFFERED_64);
+    ini_fdt_act (&driver$fdt, IO$_WRITEPBLK,    SST$write,          BUFFERED_64);
+    ini_fdt_act (&driver$fdt, IO$_ACCESS,       SST$getLinearPtr,   BUFFERED_64);
     ini_fdt_end (&driver$fdt);
 
     /*
@@ -50,8 +51,6 @@ int driver$init_tables()
 int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
 		            SST_UCB * ucb )		    /* Unit Control Block pointer			*/
 {
-    char    tmpstr[255];
-
     ADP     *adp = ucb->ucb$r_ucb.ucb$ps_adp;
     CRB     *crb = ucb->ucb$r_ucb.ucb$l_crb;
 
@@ -64,11 +63,11 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
     // exe_std$outhex((uint64)adp);
     // exe_std$outcrlf();
 
-    // SST$print_message(ucb, "unit_init: CRB is ", STS$K_INFO, FALSE);
-    // exe_std$outhex((uint64)crb);
-    // SST$print_message(ucb, ", node is ", STS$K_INFO, FALSE);
-    // exe_std$outhex((uint64)crb->crb$l_node);
-    // exe_std$outcrlf();
+    SST$print_message(ucb, "unit_init: CRB is ", STS$K_INFO, FALSE);
+    exe_std$outhex((uint64)crb);
+    SST$print_message(ucb, ", node is ", STS$K_INFO, FALSE);
+    exe_std$outhex((uint64)crb->crb$l_node);
+    exe_std$outcrlf();
 
     // confirm this is the right device
     status = ioc$read_pci_config(adp,
@@ -103,7 +102,7 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
     status = ioc$map_io(adp,
                         crb->crb$l_node,
                         &memBaseAddr,
-                        16*1024768,
+                        16777216,
                         IOC$K_BUS_MEM_BYTE_GRAN,
                         &ucb->hIO);
 
@@ -115,7 +114,36 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
         return SS$_ABORT;
     }
 
-    SST$print_message(ucb, "unit_init: pci mapped into kernel", STS$K_INFO, TRUE);
+    SST$print_message(ucb, "unit_init: pci mapped into kernel, iohandle ", STS$K_INFO, TRUE);
+    exe_std$outhex(ucb->hIO);
+    exe_std$outcrlf();
+
+    IOHANDLE *handle = (IOHANDLE *)ucb->hIO;
+    SST$print_message(ucb, "mapped region size ", STS$K_INFO, TRUE);
+    exe_std$outhex(handle->iohandle$l_mapped_region_size);
+    exe_std$outcrlf();
+    SST$print_message(ucb, "mapped region is ", STS$K_INFO, TRUE);
+    exe_std$outhex(handle->iohandle$l_base_va);
+    exe_std$outcrlf();
+
+    // Try making this accessible to users.
+    struct _va_range v2range;
+    v2range.va_range$ps_start_va    = (void *)handle->iohandle$l_base_va;
+    v2range.va_range$ps_end_va      = (void *)(handle->iohandle$l_base_va + handle->iohandle$l_mapped_region_size);
+    struct _va_range v2range_actual;
+
+    sys$setprt(
+        v2range,
+        &v2range_actual,
+        0,
+        PRT$C_UW,
+        0
+    );
+
+    SST$print_message(ucb, "actual user-accessible region is ", STS$K_INFO, TRUE);
+    exe_std$outhex((uint32)v2range_actual.va_range$ps_start_va);
+    exe_std$outhex((uint32)v2range_actual.va_range$ps_end_va);
+    exe_std$outcrlf();
 
     // OK, if we're mapped we should be able to read the status register.
     int status_register = 0x12345678;
@@ -131,13 +159,18 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
     exe_std$outhex(status_register);
     exe_std$outcrlf();
 
+    // Create some global address space for the buffer.
+    // SYS$CRMPSC?
+    // I need the virtual address of the IOHANDLE.
+
     ucb->ucb$r_ucb.ucb$v_online = 1;
 
     return( SS$_NORMAL );
 }
 
 void SST$startio (IRP *irp, SST_UCB *ucb) {
-    // skeleton
+    CRB     *crb = ucb->ucb$r_ucb.ucb$l_crb;
+
     uint32 *output_buffer = (uint32 *)irp->irp$l_qio_p1;
     int data_offset = irp->irp$l_qio_p2;
     int status;
@@ -155,22 +188,57 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
     int read_value = 0xFFFFFFFF;
 
     // The card only supports 32-bit access, so we should always be retrieving one longword at a time.
-    switch(irp->irp$l_qio_p3)
+    if(irp->irp$l_qio_p3 == IO$_ACCESS)
     {
-        case IO$_READPBLK:
-            status = ioc$read_io(ucb->ucb$r_ucb.ucb$ps_adp,
-                &ucb->hIO,
-                data_offset,
-                4,
-                &read_value);
-            break;
-        case IO$_WRITEPBLK:
-            status = ioc$write_io(ucb->ucb$r_ucb.ucb$ps_adp,
-                &ucb->hIO,
-                data_offset,
-                4,
-                &read_value);
-            break;  
+        SST$print_message(ucb, "startio: IO$_ACCESS", STS$K_INFO, TRUE);
+        IOHANDLE *handle = (IOHANDLE *)ucb->hIO;
+        *output_buffer = (uint32)handle->iohandle$l_base_va;
+    }
+    else
+    {
+        if(irp->irp$l_qio_p4 == TRUE)
+        {
+            // TRUE if config space, FALSE if memory space
+            switch(irp->irp$l_qio_p3)
+            {
+                case IO$_READPBLK:
+                    status = ioc$read_pci_config(ucb->ucb$r_ucb.ucb$ps_adp,
+                        crb->crb$l_node,
+                        data_offset,
+                        4,
+                        &read_value);
+                    break;
+                case IO$_WRITEPBLK:
+                    status = ioc$write_pci_config(ucb->ucb$r_ucb.ucb$ps_adp,
+                        crb->crb$l_node,
+                        data_offset,
+                        4,
+                        read_value);
+                    break;  
+            }
+        }
+        else if(irp->irp$l_qio_p4 == FALSE)
+        {
+            switch(irp->irp$l_qio_p3)
+            {
+                case IO$_READPBLK:
+                    status = ioc$read_io(ucb->ucb$r_ucb.ucb$ps_adp,
+                        &ucb->hIO,
+                        data_offset,
+                        4,
+                        &read_value);
+                    break;
+                case IO$_WRITEPBLK:
+                    status = ioc$write_io(ucb->ucb$r_ucb.ucb$ps_adp,
+                        &ucb->hIO,
+                        data_offset,
+                        4,
+                        &read_value);
+                    break;  
+            }
+        }  
+
+        *output_buffer = read_value;
     }
 
     SST$print_message(ucb, "startio: read value ", STS$K_INFO, FALSE);
@@ -179,8 +247,6 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
     SST$print_message(ucb, "startio: status ", STS$K_INFO, FALSE);
     exe_std$outhex(status);
     exe_std$outcrlf();
-
-    *output_buffer = read_value;
 
     ioc_std$reqcom(SS$_NORMAL, 0, &(ucb->ucb$r_ucb));
     return;   
@@ -251,6 +317,16 @@ void SST$print_message(SST_UCB *ucb, char *message, int severity, int crlf)
 }
 
 /* QIO functions */
+int SST$getLinearPtr (IRP *irp, PCB *pcb, SST_UCB *ucb, CCB *ccb) {
+    // Skeleton.
+
+    // todo: preprocessing
+    irp->irp$l_qio_p3 = IO$_ACCESS;
+    return ( call_qiodrvpkt (irp, (UCB *)ucb) );
+
+    //return ( call_finishio (irp, (UCB *)ucb, SS$_NORMAL, 0) );
+}
+
 int SST$read (IRP *irp, PCB *pcb, SST_UCB *ucb, CCB *ccb) {
     // Skeleton.
 
