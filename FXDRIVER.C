@@ -5,7 +5,11 @@ extern DPT driver$dpt;
 extern DDT driver$ddt;
 extern FDT driver$fdt;
 
+//#define DEBUG
+
 // PCI bus ADP is FFFFFFFF.81D1F7C0 
+
+static $DESCRIPTOR (voodoo2_section_name, "voodoo2_global");
 
 int driver$init_tables()
 {
@@ -55,19 +59,9 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
     CRB     *crb = ucb->ucb$r_ucb.ucb$l_crb;
 
     int vendorid, deviceid;
-    uint64 memBaseAddr;
     int status;
 
     // We can't use C RTL functions from inside the kernel.
-    // SST$print_message(ucb, "unit_init: ADP is ", STS$K_INFO, FALSE);
-    // exe_std$outhex((uint64)adp);
-    // exe_std$outcrlf();
-
-    SST$print_message(ucb, "unit_init: CRB is ", STS$K_INFO, FALSE);
-    exe_std$outhex((uint64)crb);
-    SST$print_message(ucb, ", node is ", STS$K_INFO, FALSE);
-    exe_std$outhex((uint64)crb->crb$l_node);
-    exe_std$outcrlf();
 
     // confirm this is the right device
     status = ioc$read_pci_config(adp,
@@ -82,29 +76,38 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
                         2,
                         (int *)&deviceid);
 
+#ifdef DEBUG
     SST$print_message(ucb, "unit_init: vendor id is ", STS$K_INFO, FALSE);
     exe_std$outhex(vendorid);
     SST$print_message(ucb, "unit_init: device id is ", STS$K_INFO, FALSE);
     exe_std$outhex(deviceid >> 16);
     exe_std$outcrlf();
+#endif
 
+    int physical;
     // get the base physical address
     status = ioc$read_pci_config(adp,
                         crb->crb$l_node,
                         V2PCI$MEMBASEADDR,
                         4,
-                        (int *)&memBaseAddr);
+                        &physical);
 
+    ucb->physical_base = physical;
+
+#ifdef DEBUG
     SST$print_message(ucb, "unit_init: physical base addr is $", STS$K_INFO, FALSE);
-    exe_std$outhex(memBaseAddr);
+    exe_std$outhex(ucb->physical_base);
     exe_std$outcrlf();
+#endif
+
+    uint64 hIO;
 
     status = ioc$map_io(adp,
                         crb->crb$l_node,
-                        &memBaseAddr,
-                        16777216,
+                        &ucb->physical_base,
+                        1048576*16,
                         IOC$K_BUS_MEM_BYTE_GRAN,
-                        &ucb->hIO);
+                        &hIO);
 
     if(status != SS$_NORMAL)
     {
@@ -114,36 +117,25 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
         return SS$_ABORT;
     }
 
+    ucb->hIO = hIO;
+#ifdef DEBUG
     SST$print_message(ucb, "unit_init: pci mapped into kernel, iohandle ", STS$K_INFO, TRUE);
     exe_std$outhex(ucb->hIO);
     exe_std$outcrlf();
+#endif
 
-    IOHANDLE *handle = (IOHANDLE *)ucb->hIO;
-    SST$print_message(ucb, "mapped region size ", STS$K_INFO, TRUE);
-    exe_std$outhex(handle->iohandle$l_mapped_region_size);
+    uint64 v2_physical_address = ((IOHANDLE *)ucb->hIO)->iohandle$q_platform_pa;
+    uint64 voodoo2_section_ident = 0;
+
+#ifdef DEBUG
+    SST$print_message(ucb, "unit_init: V2 phys addr is ", STS$K_INFO, TRUE);
+    exe_std$outhex(v2_physical_address);
     exe_std$outcrlf();
-    SST$print_message(ucb, "mapped region is ", STS$K_INFO, TRUE);
-    exe_std$outhex(handle->iohandle$l_base_va);
+
+    SST$print_message(ucb, "unit_init: crmpsc_pfn_64: ", STS$K_INFO, FALSE);
+    exe_std$outhex(status);
     exe_std$outcrlf();
-
-    // Try making this accessible to users.
-    struct _va_range v2range;
-    v2range.va_range$ps_start_va    = (void *)handle->iohandle$l_base_va;
-    v2range.va_range$ps_end_va      = (void *)(handle->iohandle$l_base_va + handle->iohandle$l_mapped_region_size);
-    struct _va_range v2range_actual;
-
-    sys$setprt(
-        v2range,
-        &v2range_actual,
-        0,
-        PRT$C_UW,
-        0
-    );
-
-    SST$print_message(ucb, "actual user-accessible region is ", STS$K_INFO, TRUE);
-    exe_std$outhex((uint32)v2range_actual.va_range$ps_start_va);
-    exe_std$outhex((uint32)v2range_actual.va_range$ps_end_va);
-    exe_std$outcrlf();
+#endif
 
     // OK, if we're mapped we should be able to read the status register.
     int status_register = 0x12345678;
@@ -155,13 +147,11 @@ int SST$unit_init(  IDB *idb,			    /* Interrupt Data Block pointer			*/
                          4,
                          &status_register);
 
+#ifdef DEBUG
     SST$print_message(ucb, "unit_init: status register is $", STS$K_INFO, FALSE);
     exe_std$outhex(status_register);
     exe_std$outcrlf();
-
-    // Create some global address space for the buffer.
-    // SYS$CRMPSC?
-    // I need the virtual address of the IOHANDLE.
+#endif
 
     ucb->ucb$r_ucb.ucb$v_online = 1;
 
@@ -176,23 +166,20 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
     int status;
     int orig_ipl;
 
-    SST$print_message(ucb, "startio: output buffer ", STS$K_INFO, FALSE);
-    exe_std$outhex((int)output_buffer);
-    exe_std$outcrlf();
-    SST$print_message(ucb, "startio: data offset ", STS$K_INFO, FALSE);
-    exe_std$outhex(data_offset);
-    exe_std$outcrlf();
-
     device_lock(ucb->ucb$r_ucb.ucb$l_dlck, RAISE_IPL, &orig_ipl);
 
     int read_value = 0xFFFFFFFF;
+    int write_value;
 
     // The card only supports 32-bit access, so we should always be retrieving one longword at a time.
     if(irp->irp$l_qio_p3 == IO$_ACCESS)
     {
+        #ifdef DEBUG
         SST$print_message(ucb, "startio: IO$_ACCESS", STS$K_INFO, TRUE);
+        #endif
         IOHANDLE *handle = (IOHANDLE *)ucb->hIO;
-        *output_buffer = (uint32)handle->iohandle$l_base_va;
+        uint64 *buffer = (uint64 *)irp->irp$l_qio_p1;
+        *buffer = handle->iohandle$q_bus_pa;
     }
     else
     {
@@ -202,6 +189,15 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
             switch(irp->irp$l_qio_p3)
             {
                 case IO$_READPBLK:
+                    #ifdef DEBUG
+                    SST$print_message(ucb, "startio: read PCI config. output buffer ", STS$K_INFO, FALSE);
+                    exe_std$outhex((int)output_buffer);
+                    exe_std$outcrlf();
+                    SST$print_message(ucb, "startio: data offset ", STS$K_INFO, FALSE);
+                    exe_std$outhex(data_offset);
+                    exe_std$outcrlf();
+                    #endif
+
                     status = ioc$read_pci_config(ucb->ucb$r_ucb.ucb$ps_adp,
                         crb->crb$l_node,
                         data_offset,
@@ -209,11 +205,21 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
                         &read_value);
                     break;
                 case IO$_WRITEPBLK:
+                        #ifdef DEBUG
+                        SST$print_message(ucb, "startio: write PCI config. address ", STS$K_INFO, FALSE);
+                        exe_std$outhex(data_offset);
+                        exe_std$outcrlf();
+                        SST$print_message(ucb, "startio: data ", STS$K_INFO, FALSE);
+                        exe_std$outhex(*output_buffer);
+                        exe_std$outcrlf();
+                        #endif
+
+                    write_value = *output_buffer;
                     status = ioc$write_pci_config(ucb->ucb$r_ucb.ucb$ps_adp,
                         crb->crb$l_node,
                         data_offset,
                         4,
-                        read_value);
+                        write_value);
                     break;  
             }
         }
@@ -241,12 +247,14 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
         *output_buffer = read_value;
     }
 
+    #ifdef DEBUG
     SST$print_message(ucb, "startio: read value ", STS$K_INFO, FALSE);
     exe_std$outhex(read_value);
     exe_std$outcrlf();
     SST$print_message(ucb, "startio: status ", STS$K_INFO, FALSE);
     exe_std$outhex(status);
     exe_std$outcrlf();
+    #endif
 
     ioc_std$reqcom(SS$_NORMAL, 0, &(ucb->ucb$r_ucb));
     return;   
@@ -256,8 +264,9 @@ void SST$startio (IRP *irp, SST_UCB *ucb) {
 // Called upon initial load. Set up any structures the driver needs.
 void SST$struc_init (CRB *crb, DDB *ddb, IDB *idb, ORB *orb, SST_UCB *ucb) {
     ucb->ucb$r_ucb.ucb$b_devclass = DC$_VIDEO;
+    #ifdef DEBUG
     SST$print_message(ucb, "struc_init called. makima is listening", STS$K_INFO, TRUE);
-
+    #endif
     return;
 }
 

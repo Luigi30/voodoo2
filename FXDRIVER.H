@@ -13,6 +13,7 @@
 #include <dcdef.h>				/* Device adaptor, class and type definitions	*/
 #include <ddbdef.h>				/* Device data block definitions		*/
 #include <ddtdef.h>				/* Driver dispatch table definitions		*/
+#include <descrip.h>
 #include <devdef.h>				/* Device characteristics definitions		*/
 #include <dptdef.h>				/* Driver prologue table definitions		*/
 #include <dyndef.h>				/* Data structure type definitions		*/
@@ -29,6 +30,7 @@
 #include <pcbdef.h>				/* Process control block definitions		*/
 #include <pcidef.h>				/* PCI bus definitions				*/
 #include <PRTDEF.H>
+#include <PSLDEF.H>
 #include <scsidef.h>				/* SCSI definitions				*/
 #include <scdtdef.h>				/* SCSI connection descriptor table definitions	*/
 #include <scdrpdef.h>				/* SCSI class driver request packet definitions	*/
@@ -70,6 +72,8 @@ extern void exe_std$outcrlf();			/* ** TEMP m/b defined in exe_routines.h */
 typedef struct {
     UCB     ucb$r_ucb;                   /* Generic UCB */
     uint64  hIO;
+    uint64  virtual_base;
+    uint64  physical_base;
 } SST_UCB;
 
 void SST$struc_init(CRB *crb, DDB *ddb, IDB *idb, ORB *orb, SST_UCB *ucb);
